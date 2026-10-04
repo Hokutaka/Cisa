@@ -1,0 +1,6 @@
+target/
+*.o
+*.obj
+*.exe
+*.bin
+*.rom
