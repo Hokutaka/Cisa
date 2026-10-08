@@ -2,8 +2,215 @@
 
 自作言語でCPUを作ってみたくなった。  
 なんだかよく分からないけど、Ceruneに `emit-fpga` を作っても面白いかもしれないという話がある（ほんとうか？）  
+
 ただ、いきなりFPGAに行ってもなにが必要なのか分からないので、まずはCeruneで仮想CPUを泥臭く実装してみることにした。  
-そのためにCPU、命令セット、メモリ、スタック、I/Oあたりを実際に作っていくことで、DogfoodingでCeruneにはなにが足りないのかを確認できるはず、という考え方をしています。  
+
+そのためにCPU、命令セット、メモリ、スタック、I/Oあたりを実際に作っていくことで、DogfoodingでCeruneにはなにが足りないのかを確認できるはず、という考え方をしています。
+
+
+## 現在地
+
+いまのCisaは、32bit固定長命令を実行する小さな仮想CPUです。
+
+```text
+Machine
+├─ CPU
+│  ├─ 8 x u32 General Purpose Registers
+│  ├─ Program Counter
+│  ├─ Stack Pointer
+│  ├─ Zero Flag
+│  ├─ Carry Flag
+│  └─ Instruction Decoder
+│
+├─ ROM
+│  └─ u32 fixed-width instructions
+│
+└─ RAM
+   ├─ 16 x u32 words
+   └─ Stack
+```
+
+Program Counterはまだbyte addressではなく、ROM上の命令番号をそのまま持っています。
+
+RAMも現在はbyte-addressedではなく、`u32` のword-addressed memoryです。
+
+```text
+RAM[0]
+RAM[1]
+...
+RAM[14]
+RAM[15]
+```
+
+Stackは同じRAMを使い、上端から下方向へ伸びます。
+
+```text
+empty:
+
+sp = 16
+
+PUSH:
+
+sp = sp - 1
+RAM[sp] = value
+
+POP:
+
+value = RAM[sp]
+sp = sp + 1
+```
+
+
+## 現在のISA
+
+命令はすべて32bit固定長です。
+
+| 命令 | 内容 |
+| --- | --- |
+| `MOVI rd, imm` | 16bit即値をregisterへ入れる |
+| `ADD rd, rs1, rs2` | 32bit加算 |
+| `SUB rd, rs1, rs2` | 32bit減算 |
+| `JMP target` | 無条件branch |
+| `JZ target` | Zero flagによる条件branch |
+| `LOAD rd, address` | RAMからregisterへ読む |
+| `STORE rs, address` | registerからRAMへ書く |
+| `PUSH reg` | registerの値をstackへ積む |
+| `POP reg` | stackからregisterへ取り出す |
+| `OUT reg` | registerの値を表示する |
+| `HALT` | CPUを停止する |
+
+ADD / SUBのwraparoundはCeruneの通常の整数演算とは少し違います。
+
+Ceruneの整数演算はoverflow / underflowを検出して停止するため、Cisa側ではCPUとしての32bit wraparoundを明示的に実装しています。
+
+このあたりもCeruneでCPUを作ってみると見えてくる違いのひとつです。
+
+
+## 命令形式
+
+RRR形式:
+
+```text
+31        24 23        16 15         8 7          0
++-----------+------------+-------------+------------+
+|  opcode   |     rd     |     rs1     |    rs2     |
++-----------+------------+-------------+------------+
+```
+
+ADD / SUBなどで使います。
+
+RI16形式:
+
+```text
+31        24 23        16 15                       0
++-----------+------------+--------------------------+
+|  opcode   |   rd/rs    |      immediate:16        |
++-----------+------------+--------------------------+
+```
+
+MOVI / LOAD / STOREなどで使います。
+
+J16形式:
+
+```text
+31        24 23        16 15                       0
++-----------+------------+--------------------------+
+|  opcode   |   unused   |        target:16         |
++-----------+------------+--------------------------+
+```
+
+JMP / JZで使います。
+
+R形式:
+
+```text
+31        24 23        16 15                       0
++-----------+------------+--------------------------+
+|  opcode   |    reg     |          unused          |
++-----------+------------+--------------------------+
+```
+
+OUT / PUSH / POPなどで使います。
+
+
+## Stack
+
+現在のテストROMでは、stackのLIFO動作を確認しています。
+
+人間向けに書くとこんなプログラムです。
+
+```asm
+MOVI r0, 10
+PUSH r0
+
+MOVI r0, 20
+PUSH r0
+
+POP r1
+OUT r1
+
+POP r2
+OUT r2
+
+HALT
+```
+
+実行結果:
+
+```text
+20
+10
+```
+
+最後にPUSHした20が最初にPOPされ、その次に10が取り出されます。
+
+まだ `CALL` / `RET` はありません。
+
+次はreturn addressをstackへ保存して、サブルーチン呼び出しを作ってみたいところです。
+
+
+## CeruneのDogfooding
+
+CisaはCeruneそのもののDogfoodingでもあります。
+
+現在は同じCisaプログラムを、Ceruneの複数の実行経路で動かして結果を比較できます。
+
+```powershell
+cerune check src/cpu.ceru
+
+cerune run src/cpu.ceru
+cerune run-mir src/cpu.ceru
+cerune run-mir src/cpu.ceru --ssa
+cerune run-vm src/cpu.ceru
+```
+
+現在のstackテストでは、すべて同じ結果になります。
+
+```text
+20
+10
+```
+
+つまりざっくり、
+
+```text
+Cisa
+  ↓
+Machine state
+  ↓
+CPU + RAM + Stack
+  ↓
+Cerune
+  ├─ IR
+  ├─ MIR
+  ├─ SSA
+  └─ VM
+```
+
+という経路で同じCPUを観察できます。
+
+Cisaを育てながらCerune側の表現や実行経路も育てて、両方をDogfoodingしていく予定です。
+
 
 ## やりたいこと
 
@@ -14,6 +221,7 @@ Cisa
 ├─ CPU
 │  ├─ Registers
 │  ├─ Program Counter
+│  ├─ Stack Pointer
 │  ├─ ALU
 │  ├─ Flags
 │  └─ Instruction Decoder
@@ -23,6 +231,7 @@ Cisa
 │  ├─ Bit operations
 │  ├─ Branch
 │  ├─ Load / Store
+│  ├─ Push / Pop
 │  ├─ Call / Return
 │  └─ I/O
 │
@@ -48,10 +257,13 @@ Cisa
    └─ Games / Programs
 ```
 
-まずは32bit程度の小さな仮想CPUとして作っていく予定です。  
-CPUだけで終わらず、RAM、スタック、割り込み、タイマー、画面、入力なども実装して、最終的には小さな仮想ゲーム機くらいまで持っていけたら面白そうです。  
-その過程でCerune側に必要になった機能は、実際の用途を見ながら追加していきます。  
-そして、もし本当にCeruneからハードウェアを生成できそうなら、  
+まずは32bit程度の小さな仮想CPUとして作っていく予定です。
+
+CPUだけで終わらず、RAM、スタック、割り込み、タイマー、画面、入力なども実装して、最終的には小さな仮想ゲーム機くらいまで持っていけたら面白そうです。
+
+その過程でCerune側に必要になった機能は、実際の用途を見ながら追加していきます。
+
+そして、もし本当にCeruneからハードウェアを生成できそうなら、
 
 ```text
 Cisa
@@ -65,10 +277,12 @@ Verilog?
 FPGA
 ```
 
-みたいなところまで行ってみたいです。  
-今のところ、そこまで本当に行けるのかは分かりません。  
-その確認も含めてCisaを作ります。  
+みたいなところまで行ってみたいです。
 
-# 名前の由来
+今のところ、そこまで本当に行けるのかは分かりません。  
+その確認も含めてCisaを作ります。
+
+
+## 名前の由来
 
 Cerune ISA から Cisa。

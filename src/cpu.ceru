@@ -22,43 +22,74 @@
 // 今回追加したもの
 // -----------------------------------------------------------------------------
 //
-//   RAM
-//   LOAD
-//   STORE
+//   Stack Pointer
+//   PUSH
+//   POP
 //
-// これまでのCisaはCPU内部のregisterだけで状態を持っていた。
+// CisaにはすでにRAMがある。
 //
-// 今回はCPUの外側に小さなRAMを追加し、
+// 今回はそのRAMの上端側をstackとして使う。
 //
-//   LOAD  rd, address
-//   STORE rs, address
+// RAM_SIZE = 16の場合:
 //
-// でregisterとRAMの間を値が移動できるようにする。
+//   RAM[0]
+//   RAM[1]
+//   ...
+//   RAM[13]
+//   RAM[14]   <- stack
+//   RAM[15]   <- stack
+//   --------
+//   sp = 16   <- empty stack
 //
-// CPUとRAMをまとめた状態はMachineとして持つ。
+// stackは上のaddressから下方向へ伸びる。
+//
+// PUSH:
+//
+//   sp = sp - 1
+//   RAM[sp] = value
+//
+// POP:
+//
+//   value = RAM[sp]
+//   sp = sp + 1
+//
+// 初期状態では:
+//
+//   sp = 16
+//
+// なのでstackは空。
+//
+// 最初のPUSHで:
+//
+//   sp = 15
+//
+// となりRAM[15]へ値を書き込む。
+//
+//
+// -----------------------------------------------------------------------------
+// Machine
+// -----------------------------------------------------------------------------
+//
+// 現在のCisa全体:
 //
 //   Machine
 //   ├─ Cpu
 //   │  ├─ Registers
 //   │  ├─ Program Counter
+//   │  ├─ Stack Pointer
 //   │  └─ Flags
 //   │
 //   └─ RAM
 //
-// まだbyte-addressed memoryではない。
+// stack専用の別memoryを作るのではなく、
+// 通常のRAMと同じmemoryを使っている。
 //
-// addressはRAM上のu32要素番号をそのまま表す。
+// 将来的には:
 //
-// 例えば:
+//   CALL
+//   RET
 //
-//   address = 0
-//       -> RAM[0]
-//
-//   address = 1
-//       -> RAM[1]
-//
-// なのでaddress=1は「1byte先」ではなく、
-// 「2個目の32bit word」を意味する。
+// でreturn addressをこのstackへ保存する予定。
 //
 //
 // -----------------------------------------------------------------------------
@@ -77,12 +108,7 @@
 //   |  opcode   |     rd     |     rs1     |    rs2     |
 //   +-----------+------------+-------------+------------+
 //
-//   opcode : 何の命令か
-//   rd     : 結果を書き込むレジスタ
-//   rs1    : 第1入力レジスタ
-//   rs2    : 第2入力レジスタ
-//
-// ADD / SUB などで使う。
+// ADD / SUBなどで使う。
 //
 //
 // -----------------------------------------------------------------------------
@@ -96,20 +122,6 @@
 //
 // MOVI / LOAD / STOREなどで使う。
 //
-// MOVI:
-//
-//   [ opcode | rd | immediate ]
-//
-// LOAD:
-//
-//   [ opcode | rd | address ]
-//
-// STORE:
-//
-//   [ opcode | rs | address ]
-//
-// 下位16bitの意味は命令ごとに異なる。
-//
 //
 // -----------------------------------------------------------------------------
 // R形式
@@ -120,7 +132,7 @@
 //   |  opcode   |    reg     |          unused          |
 //   +-----------+------------+--------------------------+
 //
-// OUTなどで使う。
+// OUT / PUSH / POPなどで使う。
 //
 //
 // -----------------------------------------------------------------------------
@@ -137,32 +149,11 @@
 // targetはbyte addressではない。
 //
 // 現在のCisaではProgram Counter自体が
-//
-//   ROM上の命令番号
-//
-// を表しているため、targetもそのまま命令番号になる。
-//
-// 例えば:
-//
-//   JMP 3
-//
-// なら:
-//
-//   pc = 3
-//
-// となり、ROMの4番目の命令へ移動する。
-//
-// まだAssemblerが存在しないため:
-//
-//   JMP loop
-//
-// のようなlabelは使えない。
-//
-// encode_jmp(3) のように命令番号を直接指定する。
+// ROM上の命令番号になっている。
 //
 //
 // -----------------------------------------------------------------------------
-// v2 ISA
+// v3 ISA
 // -----------------------------------------------------------------------------
 //
 // MOVI rd, imm
@@ -170,103 +161,100 @@
 //
 // ADD rd, rs1, rs2
 //   rs1 + rs2 を32bit加算してrdへ入れる。
-//   overflowした場合は下位32bitを結果とし、carry=true。
+//   overflowした場合はwraparoundする。
+//   carry-outがあればcarry=true。
 //
 // SUB rd, rs1, rs2
 //   rs1 - rs2 を32bit減算してrdへ入れる。
-//   0未満になる場合は32bitでwraparoundする。
-//   borrowが発生した場合はcarry=trueとする。
-//
-//   NOTE:
-//   SUB時のflag semanticsはまだ仮。
-//   将来的にCarryとBorrowをどう定義するかは
-//   ISA設計として改めて整理してもよい。
+//   underflowした場合はwraparoundする。
+//   borrowが発生した場合はcarry=true。
 //
 // JMP target
-//   無条件でpcをtargetへ変更する。
+//   無条件branch。
 //
 // JZ target
-//   Zero flagがtrueならpcをtargetへ変更する。
-//   falseなら次の命令へ進む。
+//   Zero flagがtrueならbranch。
 //
 // LOAD rd, address
-//   RAM[address]の値をrdへ読み込む。
-//
-//   現在のCisaではregister writeによって
-//   Zero flagが更新される設計なので、LOADでもZero flagを更新する。
-//
-//   Carry flagは変更しない。
+//   RAM[address]をrdへ読む。
 //
 // STORE rs, address
-//   rsの値をRAM[address]へ書き込む。
+//   rsをRAM[address]へ書く。
 //
-//   registerもflagも変更しない。
+// PUSH reg
+//   regの値をstackへ積む。
+//
+// POP reg
+//   stackの一番上の値をregへ取り出す。
 //
 // OUT reg
-//   registerの値を表示する。
-//
-//   将来的にはmemory mapped I/Oなどへ
-//   置き換えるかもしれない。
+//   regの値を表示する。
 //
 // HALT
 //   CPUを停止する。
 //
 //
 // -----------------------------------------------------------------------------
-// CPU / Machine全体の定数
+// CPU / Machine constants
 // -----------------------------------------------------------------------------
 
-// 汎用レジスタは r0 ～ r7 の8本。
+// r0 ～ r7
 const REGISTER_COUNT: i64 = 8;
 
 
 // RAMは16 word。
 //
 // 1 word = u32。
-//
-// 現在はword-addressedなので、
-//
-//   0 ～ 15
-//
-// をそのまま配列indexとして使う。
 const RAM_SIZE: i64 = 16;
 
 
-// 今回のテストROMは10命令。
+// stackが空のときのStack Pointer。
 //
-//   0: MOVI  r0, 3
-//   1: STORE r0, 0
-//   2: MOVI  r1, 1
-//   3: LOAD  r0, 0
-//   4: OUT   r0
-//   5: SUB   r0, r0, r1
-//   6: STORE r0, 0
-//   7: JZ    9
-//   8: JMP   3
-//   9: HALT
+// RAMの有効indexは:
 //
-// ROMを固定長配列にしているため、
-// サイズも型の一部になっている。
-const ROM_SIZE: i64 = 10;
+//   0 .. 15
+//
+// なので:
+//
+//   sp = 16
+//
+// は「stackに何も入っていない」状態として使える。
+const STACK_EMPTY_SP: u32 = 16u32;
+
+
+// 今回のテストROM:
+//
+//   MOVI r0, 10
+//   PUSH r0
+//
+//   MOVI r0, 20
+//   PUSH r0
+//
+//   POP r1
+//   OUT r1
+//
+//   POP r2
+//   OUT r2
+//
+//   HALT
+//
+// 合計9命令。
+const ROM_SIZE: i64 = 9;
 
 
 // -----------------------------------------------------------------------------
 // bit mask
 // -----------------------------------------------------------------------------
 
-// 8bitだけ残すためのmask。
-//
-// 255 = 0xff
+// 8bit mask。
 const BYTE_MASK_U32: u32 = 255u32;
 
 
-// 16bitだけ残すためのmask。
-//
-// 65535 = 0xffff
+// 16bit mask。
 const IMMEDIATE_MASK_U32: u32 = 65535u32;
 
 
-// 32bit unsigned integerの最大値。
+// u32最大値。
 //
 // 0xffffffff
 const U32_MAX_U64: u64 = 4294967295u64;
@@ -274,38 +262,13 @@ const U32_MAX_U64: u64 = 4294967295u64;
 
 // 2^32。
 //
-// SUBでunderflowしたとき、
-// 32bit CPUらしいwraparoundを計算するために使う。
-//
-// 例えば:
-//
-//   0 - 1
-//
-// は数学上:
-//
-//   -1
-//
-// だが、32bit unsigned CPUでは:
-//
-//   0xffffffff
-//
-// になる。
-//
-// そのため:
-//
-//   2^32 + 0 - 1
-//
-// を計算する。
+// SUBのwraparoundに使う。
 const U32_MODULO_U64: u64 = 4294967296u64;
 
 
 // -----------------------------------------------------------------------------
 // opcode
 // -----------------------------------------------------------------------------
-
-// opcodeは命令の種類を表す番号。
-//
-// 命令の最上位8bitに格納する。
 
 const OP_MOVI: u8 = 1;
 const OP_ADD: u8 = 2;
@@ -318,11 +281,11 @@ const OP_JZ: u8 = 6;
 const OP_LOAD: u8 = 7;
 const OP_STORE: u8 = 8;
 
+const OP_PUSH: u8 = 9;
+const OP_POP: u8 = 10;
 
-// 255 = 0xff
-//
-// HALTを通常命令から少し離れた値にしている。
-// 今のところ特別な意味はない。
+
+// HALT
 const OP_HALT: u8 = 255;
 
 
@@ -330,99 +293,56 @@ const OP_HALT: u8 = 255;
 // CPU state
 // -----------------------------------------------------------------------------
 
-// CPUが現在持っている内部状態。
-//
-// CPUというのは結局:
-//
-//   現在の状態
-//      ↓
-//   命令実行
-//      ↓
-//   次の状態
-//
-// を繰り返す機械として考えられる。
-//
-// ただし今回からRAMも追加されたため、
-// CPUだけでは「コンピュータ全体の状態」ではなくなった。
-//
-// そのためstep()では:
-//
-//   Machine -> Machine
-//
-// というstate transitionを扱う。
-
 type Cpu {
     // General Purpose Registers.
     //
     // r0 ～ r7。
-    //
-    // それぞれ32bit unsigned integerを保持する。
     regs: [u32; REGISTER_COUNT],
 
 
     // Program Counter.
     //
-    // 次に実行する命令がROMの何番目にあるかを示す。
-    //
-    // 現在のCisaではbyte addressではなく
-    // 「命令番号」をそのまま使う。
-    //
-    //   pc = 0
-    //     -> ROMの1個目
-    //
-    //   pc = 1
-    //     -> ROMの2個目
-    //
-    // 通常命令ではpc + 1する。
-    //
-    // JMP / JZでは任意の命令番号へ変更される。
+    // ROM上の命令番号。
     pc: u32,
+
+
+    // Stack Pointer.
+    //
+    // stackの一番上を指す。
+    //
+    // stackが空なら:
+    //
+    //   sp = 16
+    //
+    // PUSHすると:
+    //
+    //   sp = sp - 1
+    //
+    // POPすると:
+    //
+    //   sp = sp + 1
+    //
+    // stackはRAMの上端から下方向へ伸びる。
+    sp: u32,
 
 
     // Zero flag.
     //
     // 最後にregisterへ書き込まれた値が0ならtrue。
-    //
-    // 例えば:
-    //
-    //   SUB r0, r0, r1
-    //
-    // の結果が0になればzero=true。
-    //
-    // 続く:
-    //
-    //   JZ end
-    //
-    // がbranchする。
     zero: bool,
 
 
     // Carry flag.
     //
-    // 現在は算術演算時の桁あふれ情報として使う。
+    // ADDではcarry-out。
     //
-    // ADD:
+    // SUBでは現在borrowをtrueとしている。
     //
-    //   32bitを超えるcarry-outがあればtrue。
-    //
-    // SUB:
-    //
-    //   subtractionでborrowが必要ならtrue。
-    //
-    // NOTE:
-    //
-    // この意味はまだ仮仕様。
-    //
-    // 実CPUではISAによってSUB時のCarry flagの意味が異なる。
-    // 将来的にはきちんと仕様として決める。
+    // SUB時の意味はまだ仮仕様。
     carry: bool,
 
 
-    // HALT命令が実行されたか。
-    //
-    // trueならCPUは停止済み。
-    //
-    // step()をさらに呼んでも状態は変化しない。
+    // HALT済みか。
     halted: bool,
 }
 
@@ -431,7 +351,7 @@ type Cpu {
 // Machine state
 // -----------------------------------------------------------------------------
 
-// CPUとRAMをまとめた「仮想コンピュータ全体」の状態。
+// CPUとRAMをまとめた仮想コンピュータ全体。
 //
 // 今後:
 //
@@ -440,24 +360,16 @@ type Cpu {
 //   Framebuffer
 //   Sound?
 //
-// などを追加する場合は、
-// このMachineへdevice stateが増えていく想定。
+// などが増えるなら、このMachineへ追加していく。
 
 type Machine {
     cpu: Cpu,
 
 
-    // とても小さいRAM。
+    // RAM。
     //
-    // 16個のu32を保持する。
-    //
-    // 現在はword-addressedなので:
-//
-//   ram[0]
-//   ram[1]
-//   ...
-//
-// をLOAD / STORE命令から直接指定する。
+    // LOAD / STOREでも使うし、
+// PUSH / POPでも同じRAMを使う。
     ram: [u32; RAM_SIZE],
 }
 
@@ -465,18 +377,8 @@ type Machine {
 // -----------------------------------------------------------------------------
 // Instruction encoder
 // -----------------------------------------------------------------------------
-//
-// まだAssemblerはない。
-//
-// そのため:
-//
-//   MOVI r0, 3
-//
-// のような命令を、Ceruneの関数で直接32bit machine codeへ変換する。
 
 fn encode_movi(rd: u8, immediate: u16) -> u32 {
-    // RI16:
-    //
     // [ opcode:8 | rd:8 | immediate:16 ]
 
     return (u32(OP_MOVI) << 24)
@@ -486,8 +388,6 @@ fn encode_movi(rd: u8, immediate: u16) -> u32 {
 
 
 fn encode_add(rd: u8, rs1: u8, rs2: u8) -> u32 {
-    // RRR:
-    //
     // [ opcode:8 | rd:8 | rs1:8 | rs2:8 ]
 
     return (u32(OP_ADD) << 24)
@@ -498,8 +398,6 @@ fn encode_add(rd: u8, rs1: u8, rs2: u8) -> u32 {
 
 
 fn encode_sub(rd: u8, rs1: u8, rs2: u8) -> u32 {
-    // ADDと同じRRR形式。
-    //
     // [ opcode:8 | rd:8 | rs1:8 | rs2:8 ]
 
     return (u32(OP_SUB) << 24)
@@ -510,8 +408,6 @@ fn encode_sub(rd: u8, rs1: u8, rs2: u8) -> u32 {
 
 
 fn encode_out(reg: u8) -> u32 {
-    // R:
-    //
     // [ opcode:8 | reg:8 | unused:16 ]
 
     return (u32(OP_OUT) << 24)
@@ -520,11 +416,7 @@ fn encode_out(reg: u8) -> u32 {
 
 
 fn encode_jmp(target: u16) -> u32 {
-    // J16:
-    //
     // [ opcode:8 | unused:8 | target:16 ]
-    //
-    // targetはROMの命令番号。
 
     return (u32(OP_JMP) << 24)
         | u32(target);
@@ -532,8 +424,6 @@ fn encode_jmp(target: u16) -> u32 {
 
 
 fn encode_jz(target: u16) -> u32 {
-    // J16:
-    //
     // [ opcode:8 | unused:8 | target:16 ]
 
     return (u32(OP_JZ) << 24)
@@ -542,8 +432,6 @@ fn encode_jz(target: u16) -> u32 {
 
 
 fn encode_load(rd: u8, address: u16) -> u32 {
-    // RI16:
-    //
     // [ opcode:8 | rd:8 | address:16 ]
 
     return (u32(OP_LOAD) << 24)
@@ -553,12 +441,7 @@ fn encode_load(rd: u8, address: u16) -> u32 {
 
 
 fn encode_store(reg: u8, address: u16) -> u32 {
-    // RI16:
-    //
     // [ opcode:8 | reg:8 | address:16 ]
-    //
-    // MOVIのrd fieldと同じ場所を、
-    // STOREではsource registerとして利用する。
 
     return (u32(OP_STORE) << 24)
         | (u32(reg) << 16)
@@ -566,11 +449,23 @@ fn encode_store(reg: u8, address: u16) -> u32 {
 }
 
 
-fn encode_halt() -> u32 {
-    // HALTはoperandを持たない。
-    //
-    // 最上位8bitへopcodeだけ入れる。
+fn encode_push(reg: u8) -> u32 {
+    // [ opcode:8 | reg:8 | unused:16 ]
 
+    return (u32(OP_PUSH) << 24)
+        | (u32(reg) << 16);
+}
+
+
+fn encode_pop(reg: u8) -> u32 {
+    // [ opcode:8 | reg:8 | unused:16 ]
+
+    return (u32(OP_POP) << 24)
+        | (u32(reg) << 16);
+}
+
+
+fn encode_halt() -> u32 {
     return u32(OP_HALT) << 24;
 }
 
@@ -580,10 +475,6 @@ fn encode_halt() -> u32 {
 // -----------------------------------------------------------------------------
 
 fn decode_opcode(instruction: u32) -> u8 {
-    // opcodeはbit 31..24。
-    //
-    // 24bit右shiftして下位8bitだけ残す。
-
     return u8(
         (instruction >> 24) & BYTE_MASK_U32
     );
@@ -591,10 +482,15 @@ fn decode_opcode(instruction: u32) -> u8 {
 
 
 fn decode_rd(instruction: u32) -> u8 {
-    // rdはbit 23..16。
+    // bit 23..16。
     //
-    // STOREでは同じbit位置をsource registerとして使う。
-
+    // 命令によって:
+//
+//   rd
+//   register
+//   source register
+//
+// など意味が変わる。
     return u8(
         (instruction >> 16) & BYTE_MASK_U32
     );
@@ -602,8 +498,6 @@ fn decode_rd(instruction: u32) -> u8 {
 
 
 fn decode_rs1(instruction: u32) -> u8 {
-    // rs1はbit 15..8。
-
     return u8(
         (instruction >> 8) & BYTE_MASK_U32
     );
@@ -611,8 +505,6 @@ fn decode_rs1(instruction: u32) -> u8 {
 
 
 fn decode_rs2(instruction: u32) -> u8 {
-    // rs2はbit 7..0。
-
     return u8(
         instruction & BYTE_MASK_U32
     );
@@ -620,8 +512,6 @@ fn decode_rs2(instruction: u32) -> u8 {
 
 
 fn decode_immediate16(instruction: u32) -> u16 {
-    // 下位16bitを取り出す。
-    //
     // 用途:
     //
     //   MOVI       immediate
@@ -642,28 +532,14 @@ fn decode_immediate16(instruction: u32) -> u16 {
 fn register_index(field: u8) -> i64 {
     // CPUにはregisterが8本しかない。
     //
-    // 0～7なので下位3bitで表せる。
+    // 下位3bitだけを使って0～7へ丸める。
     //
-    // 現在は:
+    // NOTE:
     //
-    //   field & 7
+    // 不正register番号も別registerへaliasしてしまう。
     //
-    // で強制的に0～7へ丸めている。
-    //
-    // そのため:
-    //
-    //   register field = 8
-    //
-    // のような不正値も:
-    //
-    //   8 & 7 = 0
-    //
-    // となってr0として扱われてしまう。
-    //
-    // これはかなり雑。
-    //
-    // 将来的には不正なregister numberを
-    // illegal instructionとして停止させる方がよいかもしれない。
+    // 将来的にはillegal instructionとして
+    // trapさせた方が分かりやすいかもしれない。
 
     return i64(field & 7u8);
 }
@@ -680,32 +556,25 @@ fn write_register(
     next_pc: u32,
     carry: bool,
 ) -> Cpu {
-    // Ceruneのarrayはvalueとして扱われる。
+    // Ceruneのarrayはvalue。
     //
-    // そのため元のregister arrayをコピーして、
-    // 書き込み対象だけ変更する。
+    // register arrayをコピーして1個だけ変更する。
 
     mut regs: [u32; REGISTER_COUNT] = cpu.regs;
 
     regs[register_index(reg)] = value;
 
 
-    // CPU stateを新しく作る。
-    //
-    // ..cpuで変更しないfieldを引き継ぐ。
-
     return Cpu {
         ..cpu,
 
         regs: regs,
 
-        // 次に実行する命令。
         pc: next_pc,
 
-        // 書き込まれた値が0ならZero flagを立てる。
+        // registerへ書いた値が0ならtrue。
         zero: value == 0,
 
-        // 算術演算から渡されたflag。
         carry: carry,
     };
 }
@@ -716,8 +585,8 @@ fn write_register(
 // -----------------------------------------------------------------------------
 
 fn with_cpu(machine: Machine, cpu: Cpu) -> Machine {
-    // RAMなどCPU以外の状態はそのまま引き継ぎ、
-    // CPUだけを置き換える。
+    // RAMをそのまま残し、
+    // CPU stateだけ置き換える。
 
     return Machine {
         ..machine,
@@ -731,16 +600,10 @@ fn with_cpu(machine: Machine, cpu: Cpu) -> Machine {
 // -----------------------------------------------------------------------------
 
 fn step(machine: Machine, rom: [u32; ROM_SIZE]) -> Machine {
-    // 今回の命令を実行するCPU state。
-    //
-    // Machineから取り出して扱う。
-
     cpu: Cpu = machine.cpu;
 
 
-    // HALT済みなら何もしない。
-    //
-    // step()を何度呼んでも同じMachineを返す。
+    // すでにHALT済みなら何もしない。
 
     if cpu.halted {
         return machine;
@@ -750,16 +613,11 @@ fn step(machine: Machine, rom: [u32; ROM_SIZE]) -> Machine {
     // -------------------------------------------------------------------------
     // FETCH
     // -------------------------------------------------------------------------
-    //
-    // Program Counterが示す位置から32bit instructionを読む。
 
     index: i64 = i64(cpu.pc);
 
 
-    // Program CounterがROMの外を指していたら停止。
-    //
-    // JMPなどが不正なtargetへ飛んだ場合も、
-    // 次のstep()でここへ来る。
+    // PCがROM外なら停止。
 
     if index >= array_len(rom) {
         print("pc out of range");
@@ -790,21 +648,10 @@ fn step(machine: Machine, rom: [u32; ROM_SIZE]) -> Machine {
     // -------------------------------------------------------------------------
 
     if opcode == OP_MOVI {
-        // MOVI rd, imm
-        //
-        // immediateは16bit。
-        //
-        // 現在はsigned immediateではなく、
-        // 単純にzero-extendしてu32へする。
-
         value: u32 = u32(
             decode_immediate16(instruction)
         );
 
-
-        // MOVIではcarry flagを変更しない。
-        //
-        // Zero flagはwrite_register()によって更新される。
 
         return with_cpu(
             machine,
@@ -838,37 +685,21 @@ fn step(machine: Machine, rom: [u32; ROM_SIZE]) -> Machine {
         ];
 
 
-        // ---------------------------------------------------------------------
-        // 32bit addition
-        // ---------------------------------------------------------------------
+        // Ceruneのu32 arithmeticはchecked。
         //
-        // 普通の32bit CPUなら:
-        //
-        //   0xffffffff + 1
-        //
-        // は:
-        //
-        //   result = 0x00000000
-        //   carry  = true
-        //
-        // になる。
-        //
-        // しかしCeruneのu32 arithmeticはcheckedなので、
-        // そのままu32で計算するとoverflow時に停止する。
-        //
-        // そこで先にu64へ広げて計算する。
+        // そこでu64へ広げてから計算する。
 
         wide: u64 = u64(left) + u64(right);
 
 
-        // CPU registerへ入るのは下位32bitだけ。
+        // 下位32bit。
 
         value: u32 = u32(
             wide & U32_MAX_U64
         );
 
 
-        // u32の最大値を超えていたらcarry-out。
+        // u32最大値を超えたらcarry。
 
         carry: bool = wide > U32_MAX_U64;
 
@@ -905,31 +736,7 @@ fn step(machine: Machine, rom: [u32; ROM_SIZE]) -> Machine {
         ];
 
 
-        // ---------------------------------------------------------------------
-        // 32bit subtraction
-        // ---------------------------------------------------------------------
-        //
-        // Ceruneではunsigned subtractionもchecked。
-        //
-        // そのため:
-        //
-        //   0u32 - 1u32
-        //
-        // はCPUのようにwraparoundせず、
-        // underflowとして停止する。
-        //
-        // しかしCisaでは普通の32bit CPUらしく:
-        //
-        //   0x00000000 - 0x00000001
-        //
-        //       ↓
-        //
-        //   0xffffffff
-        //
-        // にしたい。
-
-
-        // left >= rightなら普通に引き算できる。
+        // underflowしない場合。
 
         if left >= right {
             value: u32 = left - right;
@@ -950,29 +757,19 @@ fn step(machine: Machine, rom: [u32; ROM_SIZE]) -> Machine {
         }
 
 
-        // left < rightの場合はborrowが必要。
+        // underflowする場合。
         //
-        // 直接:
+        // Ceruneで直接:
         //
         //   left - right
         //
-        // をするとCerune側がunderflowする。
+        // をすると停止する。
         //
-        // そこで:
+        // そのため:
         //
         //   2^32 + left - right
         //
-        // を計算する。
-        //
-        // 例:
-        //
-        //   left  = 0
-        //   right = 1
-        //
-        //   4294967296 + 0 - 1
-        //
-        //     = 4294967295
-        //     = 0xffffffff
+        // とする。
 
         wrapped: u64 =
             U32_MODULO_U64
@@ -1006,10 +803,6 @@ fn step(machine: Machine, rom: [u32; ROM_SIZE]) -> Machine {
     // -------------------------------------------------------------------------
 
     if opcode == OP_JMP {
-        // JMP target
-        //
-        // 無条件branch。
-
         target: u32 = u32(
             decode_immediate16(instruction)
         );
@@ -1031,12 +824,6 @@ fn step(machine: Machine, rom: [u32; ROM_SIZE]) -> Machine {
     // -------------------------------------------------------------------------
 
     if opcode == OP_JZ {
-        // JZ target
-        //
-        // Zero flagがtrueならbranchする。
-        //
-        // falseなら普通に次の命令へ進む。
-
         if cpu.zero {
             target: u32 = u32(
                 decode_immediate16(instruction)
@@ -1070,21 +857,12 @@ fn step(machine: Machine, rom: [u32; ROM_SIZE]) -> Machine {
     // -------------------------------------------------------------------------
 
     if opcode == OP_LOAD {
-        // LOAD rd, address
-        //
-        // addressは下位16bit。
-        //
-        // 現在はRAM上のword indexとしてそのまま使う。
-
         address: i64 = i64(
             decode_immediate16(instruction)
         );
 
 
-        // 存在しないRAMを読もうとした場合。
-        //
-        // 今はmemory faultやexception vectorを持っていないので、
-        // messageを出してCPUを停止する。
+        // RAM外なら停止。
 
         if address >= array_len(machine.ram) {
             print("ram address out of range");
@@ -1103,13 +881,10 @@ fn step(machine: Machine, rom: [u32; ROM_SIZE]) -> Machine {
         value: u32 = machine.ram[address];
 
 
-        // LOADはregisterへ値を書き込む。
+        // LOADはregister write。
         //
-        // 現在のCisaではregister writeによって
-        // Zero flagを更新する設計なので、
-        // LOADでもZero flagが更新される。
-        //
-        // Carry flagはそのまま保持する。
+        // Zero flagを更新し、
+        // Carry flagは保持する。
 
         return with_cpu(
             machine,
@@ -1130,24 +905,12 @@ fn step(machine: Machine, rom: [u32; ROM_SIZE]) -> Machine {
     // -------------------------------------------------------------------------
 
     if opcode == OP_STORE {
-        // STORE rs, address
-        //
-        // instruction形式としては:
-        //
-        //   [ opcode | reg | address ]
-        //
-        // になっている。
-        //
-        // decode_rd()という名前のhelperを使っているが、
-        // STOREではこのfieldはdestinationではなく
-        // source registerとして扱う。
-
         address: i64 = i64(
             decode_immediate16(instruction)
         );
 
 
-        // 存在しないRAMへ書き込もうとした場合。
+        // RAM外なら停止。
 
         if address >= array_len(machine.ram) {
             print("ram address out of range");
@@ -1163,9 +926,6 @@ fn step(machine: Machine, rom: [u32; ROM_SIZE]) -> Machine {
         }
 
 
-        // Ceruneの固定長arrayはvalueなので、
-        // 現在のRAMをコピーしてから1要素だけ変更する。
-
         mut ram: [u32; RAM_SIZE] = machine.ram;
 
 
@@ -1176,24 +936,9 @@ fn step(machine: Machine, rom: [u32; ROM_SIZE]) -> Machine {
         ];
 
 
-        // STOREはregisterを書き換えない。
+        // STOREではflagを変更しない。
         //
-        // flagも変更しない。
-        //
-        // これは今回かなり重要。
-        //
-        // 例えば:
-        //
-        //   SUB   r0, r0, r1
-        //   STORE r0, 0
-        //   JZ    end
-        //
-        // という命令列では、
-        //
-        // SUBによってzero=trueになったあと、
-        // STOREを挟んでもzero=trueを保持してほしい。
-        //
-        // そのためSTOREではpcだけ進める。
+        // PCだけ進める。
 
         return Machine {
             ..machine,
@@ -1209,20 +954,158 @@ fn step(machine: Machine, rom: [u32; ROM_SIZE]) -> Machine {
 
 
     // -------------------------------------------------------------------------
+    // EXECUTE : PUSH
+    // -------------------------------------------------------------------------
+
+    if opcode == OP_PUSH {
+        // PUSH reg
+        //
+        // stackはRAMの上端から下方向へ伸びる。
+        //
+        // empty:
+        //
+        //   sp = 16
+        //
+        // PUSH:
+        //
+        //   sp = 15
+        //   RAM[15] = value
+        //
+        // 次のPUSH:
+        //
+        //   sp = 14
+        //   RAM[14] = value
+
+
+        // sp == 0なら、もう下へ伸ばせない。
+        //
+        // RAM[0]まで使用済みの状態。
+
+        if cpu.sp == 0u32 {
+            print("stack overflow");
+
+            return with_cpu(
+                machine,
+
+                Cpu {
+                    ..cpu,
+                    halted: true,
+                },
+            );
+        }
+
+
+        // Ceruneのunsigned subtractionはcheckedなので、
+        // 必ずsp == 0を検査してから引く。
+
+        next_sp: u32 = cpu.sp - 1u32;
+
+
+        mut ram: [u32; RAM_SIZE] = machine.ram;
+
+
+        // PUSH対象registerの値をstackへ保存。
+
+        ram[i64(next_sp)] = cpu.regs[
+            register_index(
+                decode_rd(instruction)
+            )
+        ];
+
+
+        // PUSHはregisterやflagを変更しない。
+        //
+        // spとpcだけ更新する。
+
+        return Machine {
+            ..machine,
+
+            cpu: Cpu {
+                ..cpu,
+
+                sp: next_sp,
+                pc: cpu.pc + 1,
+            },
+
+            ram: ram,
+        };
+    }
+
+
+    // -------------------------------------------------------------------------
+    // EXECUTE : POP
+    // -------------------------------------------------------------------------
+
+    if opcode == OP_POP {
+        // POP reg
+        //
+        // 現在spが指しているstack topを読み、
+        // registerへ書き込む。
+        //
+        // そのあとspを1増やす。
+
+
+        // sp == 16ならstackは空。
+        //
+        // >= にしておくことで、
+        // 万が一spが不正な値になっていてもRAM外を読まない。
+
+        if cpu.sp >= STACK_EMPTY_SP {
+            print("stack underflow");
+
+            return with_cpu(
+                machine,
+
+                Cpu {
+                    ..cpu,
+                    halted: true,
+                },
+            );
+        }
+
+
+        // stack topを読む。
+
+        value: u32 = machine.ram[
+            i64(cpu.sp)
+        ];
+
+
+        // POPはregister writeなので、
+        // 現在のCisaのルールではZero flagも更新する。
+        //
+        // Carry flagは保持する。
+
+        popped_cpu: Cpu = write_register(
+            cpu,
+            decode_rd(instruction),
+            value,
+            cpu.pc + 1,
+            cpu.carry,
+        );
+
+
+        // POPが成功したのでspを戻す。
+        //
+        // ここではcpu.sp < 16が確認済みなので、
+        // +1してもu32 overflowは起きない。
+
+        return with_cpu(
+            machine,
+
+            Cpu {
+                ..popped_cpu,
+                sp: cpu.sp + 1u32,
+            },
+        );
+    }
+
+
+    // -------------------------------------------------------------------------
     // EXECUTE : OUT
     // -------------------------------------------------------------------------
 
     if opcode == OP_OUT {
-        // OUT reg
-        //
-        // 今はCeruneのprint()を直接呼ぶ。
-        //
-        // 将来的には:
-        //
-        //   memory mapped I/O
-        //
-        // やdevice abstractionを作るかもしれない。
-
         print(
             cpu.regs[
                 register_index(
@@ -1232,7 +1115,7 @@ fn step(machine: Machine, rom: [u32; ROM_SIZE]) -> Machine {
         );
 
 
-        // OUTはregisterもflagも変更しない。
+        // OUTはregisterやflagを変更しない。
         //
         // PCだけ進める。
 
@@ -1252,10 +1135,6 @@ fn step(machine: Machine, rom: [u32; ROM_SIZE]) -> Machine {
     // -------------------------------------------------------------------------
 
     if opcode == OP_HALT {
-        // CPU停止。
-        //
-        // PCはHALT命令自身を指したままにする。
-
         return with_cpu(
             machine,
 
@@ -1270,11 +1149,6 @@ fn step(machine: Machine, rom: [u32; ROM_SIZE]) -> Machine {
     // -------------------------------------------------------------------------
     // Unknown instruction
     // -------------------------------------------------------------------------
-    //
-    // 知らないopcodeだった。
-    //
-    // 現在はexceptionやtrap vectorを持っていないため、
-    // エラー表示してそのまま停止する。
 
     print("unknown opcode");
     print(opcode);
@@ -1295,185 +1169,177 @@ fn step(machine: Machine, rom: [u32; ROM_SIZE]) -> Machine {
 // Test ROM
 // -----------------------------------------------------------------------------
 //
-// 今回はcountdownの値をregisterだけに置かず、
-// RAM[0]へ保存する。
+// 今回はstackのLIFO動作を確認する。
+//
+// LIFO:
+//
+//   Last In
+//   First Out
+//
+// 最後に入れたものが最初に出てくる。
+//
 //
 // 人間向けに書くと:
 //
-//   MOVI  r0, 3
-//   STORE r0, 0
+//   MOVI r0, 10
+//   PUSH r0
 //
-//   MOVI  r1, 1
+//   MOVI r0, 20
+//   PUSH r0
 //
-// loop:
-//   LOAD  r0, 0
-//   OUT   r0
-//   SUB   r0, r0, r1
-//   STORE r0, 0
-//   JZ    end
-//   JMP   loop
+//   POP  r1
+//   OUT  r1
 //
-// end:
+//   POP  r2
+//   OUT  r2
+//
 //   HALT
 //
 //
 // -----------------------------------------------------------------------------
-// RAMの変化
+// Stackの変化
 // -----------------------------------------------------------------------------
 //
-// 最初:
+// 初期状態:
 //
-//   RAM[0] = 0
+//   sp = 16
 //
-// MOVI r0, 3
-// STORE r0, 0
-//
-//   RAM[0] = 3
-//
-// 1回目:
-//
-//   LOAD r0, 0
-//       r0 = 3
-//
-//   OUT r0
-//       print 3
-//
-//   SUB r0, r0, r1
-//       r0 = 2
-//
-//   STORE r0, 0
-//       RAM[0] = 2
-//
-// 2回目:
-//
-//   RAM[0] = 1
-//
-// 3回目:
-//
-//   SUB
-//       r0 = 0
-//       zero = true
-//
-//   STORE
-//       RAM[0] = 0
-//       zero = true のまま
-//
-//   JZ
-//       HALTへbranch
+//   stack = empty
 //
 //
-// 最終的に:
+// MOVI r0, 10
 //
-//   RAM[0] = 0
+//   r0 = 10
 //
 //
-// -----------------------------------------------------------------------------
-// ROM上の命令番号
-// -----------------------------------------------------------------------------
+// PUSH r0
 //
-//   0  MOVI  r0, 3
-//   1  STORE r0, 0
-//   2  MOVI  r1, 1
+//   sp = 15
 //
-//   3  LOAD  r0, 0      <- loop
-//   4  OUT   r0
-//   5  SUB   r0,r0,r1
-//   6  STORE r0, 0
-//   7  JZ    9
-//   8  JMP   3
+//   RAM[15] = 10
 //
-//   9  HALT             <- end
+//
+// MOVI r0, 20
+//
+//   r0 = 20
+//
+//
+// PUSH r0
+//
+//   sp = 14
+//
+//   RAM[14] = 20
+//   RAM[15] = 10
+//
+//
+// POP r1
+//
+//   r1 = RAM[14]
+//
+//   r1 = 20
+//   sp = 15
+//
+//
+// OUT r1
+//
+//   20
+//
+//
+// POP r2
+//
+//   r2 = RAM[15]
+//
+//   r2 = 10
+//   sp = 16
+//
+//
+// OUT r2
+//
+//   10
+//
+//
+// 最後:
+//
+//   sp = 16
+//
+//   stack = empty
 //
 //
 // -----------------------------------------------------------------------------
 // 実行結果
 // -----------------------------------------------------------------------------
 //
-//   3
-//   2
-//   1
+//   20
+//   10
 
 program: [u32; ROM_SIZE] = [
     // 0
     //
-    // r0 = 3
+    // r0 = 10
     encode_movi(
         0u8,
-        3u16,
+        10u16,
     ),
 
 
     // 1
     //
-    // RAM[0] = r0
-    encode_store(
+    // push 10
+    encode_push(
         0u8,
-        0u16,
     ),
 
 
     // 2
     //
-    // r1 = 1
+    // r0 = 20
     encode_movi(
-        1u8,
-        1u16,
+        0u8,
+        20u16,
     ),
 
 
-    // 3 : loop
+    // 3
     //
-    // r0 = RAM[0]
-    encode_load(
+    // push 20
+    encode_push(
         0u8,
-        0u16,
     ),
 
 
     // 4
     //
-    // print r0
-    encode_out(
-        0u8,
+    // r1 = pop()
+    //
+    // => 20
+    encode_pop(
+        1u8,
     ),
 
 
     // 5
-    //
-    // r0 = r0 - r1
-    encode_sub(
-        0u8,
-        0u8,
+    encode_out(
         1u8,
     ),
 
 
     // 6
     //
-    // RAM[0] = r0
-    encode_store(
-        0u8,
-        0u16,
+    // r2 = pop()
+    //
+    // => 10
+    encode_pop(
+        2u8,
     ),
 
 
     // 7
-    //
-    // zero=trueなら9番のHALTへ。
-    encode_jz(
-        9u16,
+    encode_out(
+        2u8,
     ),
 
 
     // 8
-    //
-    // loopの先頭である3番へ戻る。
-    encode_jmp(
-        3u16,
-    ),
-
-
-    // 9 : end
     encode_halt(),
 ];
 
@@ -1505,11 +1371,14 @@ mut machine: Machine = Machine {
         pc: 0,
 
 
-        // 初期registerが全部0なので、
-        // とりあえずtrueにしている。
+        // stackは空。
         //
-        // reset時のflag値については
-        // 将来的にISA仕様として決めてもよい。
+        // RAM_SIZE=16なので、その1個上を指す。
+
+        sp: STACK_EMPTY_SP,
+
+
+        // reset時のflag値はまだ仮仕様。
 
         zero: true,
 
@@ -1526,6 +1395,8 @@ mut machine: Machine = Machine {
 
 
     // RAMも起動時はすべて0。
+    //
+    // 上端側はstackとして使われる。
 
     ram: [
         0u32,
@@ -1552,34 +1423,16 @@ mut machine: Machine = Machine {
 // Machine execution loop
 // -----------------------------------------------------------------------------
 
-// 何命令実行したか。
-//
-// branchを実装しているので、
-// HALTのないROMを実行すると本当に無限loopできる。
-//
-// simulator側まで永遠に動き続けないよう、
-// safetyとして最大100命令で止める。
-
 mut cycles: i64 = 0;
 
 
-// CPUがHALTするか、
-// 最大100命令に到達するまでstep()する。
+// HALTするか100命令に達するまで実行する。
 //
 // 現在は:
 //
-//   1 step = 1 cycle
-//
-// と呼んでいるが、これは正確には:
-//
 //   1 step = 1 instruction
 //
-// に近い。
-//
-// 実際のhardware clockとはまだ対応していない。
-//
-// 将来cycle accurate modelやpipelineを作る場合には、
-// cycleという名前も整理する必要がある。
+// であり、実際のhardware clockとはまだ一致しない。
 
 while !machine.cpu.halted && cycles < 100 {
     machine = step(
@@ -1594,15 +1447,6 @@ while !machine.cpu.halted && cycles < 100 {
 // -----------------------------------------------------------------------------
 // Execution limit
 // -----------------------------------------------------------------------------
-
-// 100命令実行してもHALTしなかった場合。
-//
-// 例えば:
-//
-// loop:
-//   JMP loop
-//
-// のようなROMを実行するとここへ来る。
 
 if !machine.cpu.halted {
     print("cycle limit reached");
