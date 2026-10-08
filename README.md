@@ -13,21 +13,22 @@
 いまのCisaは、32bit固定長命令を実行する小さな仮想CPUです。
 
 ```text
-Machine
-├─ CPU
-│  ├─ 8 x u32 General Purpose Registers
-│  ├─ Program Counter
-│  ├─ Stack Pointer
-│  ├─ Zero Flag
-│  ├─ Carry Flag
-│  └─ Instruction Decoder
+Cisa
+├─ Machine
+│  ├─ CPU
+│  │  ├─ 8 x u32 General Purpose Registers
+│  │  ├─ Program Counter
+│  │  ├─ Stack Pointer
+│  │  ├─ Zero Flag
+│  │  ├─ Carry Flag
+│  │  └─ Instruction Decoder
+│  │
+│  └─ RAM
+│     ├─ 16 x u32 words
+│     └─ Stack
 │
-├─ ROM
-│  └─ u32 fixed-width instructions
-│
-└─ RAM
-   ├─ 16 x u32 words
-   └─ Stack
+└─ ROM
+   └─ u32 fixed-width instructions
 ```
 
 Program Counterはまだbyte addressではなく、ROM上の命令番号をそのまま持っています。
